@@ -1,61 +1,22 @@
-# Custom RunPod ComfyUI 0.38.0 — CUDA 13.0
+# ComfyUI 0.38.0 on the official RunPod CUDA 13 image
 
-A custom container image based on the official RunPod
-ComfyUI infrastructure, configured for NVIDIA Blackwell GPUs.
+This build derives from RunPod's published, pinned CUDA 13 image:
 
-## Configuration
+`runpod/comfyui:1.4.5-cuda13.0`
 
-- ComfyUI version: 0.38.0
-- CUDA target: 13.0
-- PyTorch CUDA build: cu130
-- Startup argument: --gpu-only
-- Intended GPU: NVIDIA RTX PRO 6000 Blackwell (96 GB VRAM)
+It preserves the RunPod image's OS, CUDA/PyTorch environment, startup services, and preinstalled custom nodes. It updates the baked ComfyUI application to the official `v0.38.0` tag and patches the existing `/start.sh` to append `--gpu-only` exactly once. The build stops with an error if the base image's launcher shape is not one of the two explicitly supported forms; it does not silently fall back to a new container setup.
 
-## Container Image
+## Files
 
-ghcr.io/rockking18/comfyui-qwen21:0.38.0-cu130-gpu-only
+- `Dockerfile.qwen21` — derived image definition.
+- `.github/workflows/build-comfyui-qwen21-v2.yml` — manual GitHub Actions build-and-publish workflow.
 
-## Pre-installed Components
+## Expected output image
 
-The image retains the RunPod startup infrastructure and
-pre-installed utility nodes from the upstream base image.
+`ghcr.io/rocking18/comfyui-qwen21:0.38.0-cu130-gpu-only-v2`
 
-The startup configuration automatically adds --gpu-only
-to the ComfyUI arguments if it is not already present.
+The workflow uses `${{ github.repository_owner }}` for the actual publishing account, so it does not hardcode a username.
 
-## Qwen Image 2.1 Models
+## Validation boundary
 
-Model weights are not included in the container image.
-
-Download the models into the following directories after
-the Pod starts:
-
-- Diffusion models:
-  /workspace/runpod-slim/ComfyUI/models/diffusion_models/
-
-- Text encoders and prompt enhancer:
-  /workspace/runpod-slim/ComfyUI/models/text_encoders/
-
-- VAE:
-  /workspace/runpod-slim/ComfyUI/models/vae/
-
-## Access Ports
-
-- 8188/http — ComfyUI
-- 8080/http — FileBrowser
-- 8888/http — JupyterLab
-- 22/tcp — SSH
-
-## Storage
-
-This image can be used without a Network Volume.
-
-Models downloaded to the container disk are temporary. They
-must be downloaded again when a new container starts unless
-they are stored separately in persistent storage.
-
-## Source
-
-Based on the official RunPod ComfyUI repository:
-
-https://github.com/runpod-workers/comfyui-base
+This package has been statically inspected and its YAML/patch logic checked locally. The container has not been built here. The GitHub Actions run must succeed before using the output, and one test Pod must confirm ComfyUI `v0.38.0`, PyTorch CUDA `13.0` / `cu130`, and the live process argument `--gpu-only` before model downloads.
