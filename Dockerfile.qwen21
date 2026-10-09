@@ -1,6 +1,6 @@
 # Derive from RunPod's already-published official CUDA 13 ComfyUI image.
 # This deliberately does NOT rebuild Ubuntu, CUDA, PyTorch, or RunPod services.
-FROM runpod/comfyui:1.3.0-comfyuiv0.30.0-cuda13.0
+FROM runpod/comfyui:1.3.3-comfyui0.30.0-cuda13.0
 
 USER root
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
