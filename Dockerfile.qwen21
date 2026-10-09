@@ -1,0 +1,119 @@
+# Extend a pinned, officially published RunPod CUDA 13 ComfyUI image.
+# The base image provides the OS, CUDA/cu130 PyTorch stack, RunPod services,
+# custom nodes, and startup infrastructure. This build updates the baked
+# ComfyUI application to v0.38.0 and makes --gpu-only an enforced startup arg.
+FROM runpod/comfyui:1.4.5-cuda13.0
+
+USER root
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+ARG COMFYUI_VERSION=v0.38.0
+
+# Replace only the baked ComfyUI tree; retain RunPod's baked custom nodes,
+# model/user placeholders and manifest metadata. Clone the actual tagged repo
+# so ComfyUI's .git metadata refers to the official v0.38.0 commit.
+RUN set -eux; \
+    test -d /opt/comfyui-baked; \
+    test -f /opt/comfyui-baked/.runpod-bundle-version; \
+    test -f /opt/comfyui-runtime-constraints.txt; \
+    command -v git; \
+    git clone --depth 1 --branch "${COMFYUI_VERSION}" \
+      https://github.com/Comfy-Org/ComfyUI.git /tmp/comfyui-v038; \
+    if [ -d /opt/comfyui-baked/custom_nodes ]; then \
+      rm -rf /tmp/comfyui-v038/custom_nodes; \
+      cp -a /opt/comfyui-baked/custom_nodes /tmp/comfyui-v038/custom_nodes; \
+    fi; \
+    for d in user models; do \
+      if [ -d "/opt/comfyui-baked/${d}" ]; then \
+        mkdir -p "/tmp/comfyui-v038/${d}"; \
+        cp -an "/opt/comfyui-baked/${d}/." "/tmp/comfyui-v038/${d}/"; \
+      fi; \
+    done; \
+    cp /opt/comfyui-baked/.runpod-bundle-version /tmp/comfyui-v038/.runpod-bundle-version; \
+    grep -q '^COMFYUI_VERSION=' /tmp/comfyui-v038/.runpod-bundle-version; \
+    sed -i "s/^COMFYUI_VERSION=.*/COMFYUI_VERSION=${COMFYUI_VERSION}/" /tmp/comfyui-v038/.runpod-bundle-version; \
+    git -C /tmp/comfyui-v038 describe --tags --exact-match HEAD; \
+    rm -rf /opt/comfyui-baked; \
+    mv /tmp/comfyui-v038 /opt/comfyui-baked
+
+# Install the v0.38.0 core requirements in the base image's system Python.
+# The inherited constraint file pins the existing CUDA 13 PyTorch stack and
+# prevents pip from replacing it with CPU/cu128 wheels.
+RUN set -eux; \
+    PIP_CONSTRAINT=/opt/comfyui-runtime-constraints.txt \
+    PIP_INDEX_URL=https://pypi.org/simple \
+    PIP_EXTRA_INDEX_URL=https://download.pytorch.org/whl/cu130 \
+    python3.12 -m pip install --no-cache-dir \
+      --constraint /opt/comfyui-runtime-constraints.txt \
+      --index-url https://pypi.org/simple \
+      --extra-index-url https://download.pytorch.org/whl/cu130 \
+      -r /opt/comfyui-baked/requirements.txt
+
+# Patch the inherited official launcher, without replacing /start.sh or its
+# RunPod services. Support both known official launcher forms (COMFY_ARGS array
+# and FIXED_ARGS string); fail the build if neither form is found.
+RUN python3.12 - <<'PY'
+from pathlib import Path
+import re
+
+path = Path('/start.sh')
+text = path.read_text()
+marker = '# CUSTOM_GPU_ONLY_PATCH_V1'
+if marker in text:
+    print('GPU-only startup patch already present')
+else:
+    comfy_array_launch = re.compile(
+        r'(?m)^(?P<indent>[ \t]*)python[ \t]+main\.py[ \t]+"\$\{COMFY_ARGS\[@\]\}"[^\n]*$'
+    )
+    fixed_string_launch = re.compile(
+        r'(?m)^(?P<indent>[ \t]*)(?:exec[ \t]+)?python[ \t]+main\.py[ \t]+\$FIXED_ARGS(?:[ \t].*)?$'
+    )
+    if comfy_array_launch.search(text):
+        # Prefer insertion before the launch-args log line so logs show the flag.
+        log = re.search(r'(?m)^[ \t]*echo ["\']Starting ComfyUI with args:', text)
+        launch = comfy_array_launch.search(text)
+        pos = log.start() if log and log.start() < launch.start() and launch.start() - log.start() < 1000 else launch.start()
+        indent = re.match(r'[ \t]*', text[pos:]).group(0)
+        patch = (
+            f'{marker}: ensure --gpu-only is present exactly once.\n'
+            f'{indent}if [[ ! " ${{COMFY_ARGS[*]}} " == *" --gpu-only "* ]]; then\n'
+            f'{indent}    COMFY_ARGS+=(--gpu-only)\n'
+            f'{indent}fi\n\n'
+        )
+        text = text[:pos] + patch + text[pos:]
+    elif fixed_string_launch.search(text):
+        launch = fixed_string_launch.search(text)
+        log = re.search(r'(?m)^[ \t]*echo ["\']Starting ComfyUI with args:', text)
+        pos = log.start() if log and log.start() < launch.start() and launch.start() - log.start() < 1000 else launch.start()
+        indent = re.match(r'[ \t]*', text[pos:]).group(0)
+        patch = (
+            f'{marker}: ensure --gpu-only is present exactly once.\n'
+            f'{indent}if [[ " $FIXED_ARGS " != *" --gpu-only "* ]]; then\n'
+            f'{indent}    FIXED_ARGS="$FIXED_ARGS --gpu-only"\n'
+            f'{indent}fi\n\n'
+        )
+        text = text[:pos] + patch + text[pos:]
+    else:
+        raise SystemExit('ERROR: unsupported /start.sh launch form; image build must stop for review')
+    path.write_text(text)
+    print('Patched official /start.sh to add --gpu-only')
+
+# Fail the build unless exactly one marker and one expected launch form exist.
+patched = path.read_text()
+if patched.count(marker) != 1:
+    raise SystemExit('ERROR: GPU-only patch marker count is not exactly one')
+if not ('--gpu-only' in patched and ('COMFY_ARGS' in patched or 'FIXED_ARGS' in patched)):
+    raise SystemExit('ERROR: GPU-only startup argument check failed')
+PY
+
+# Build-time smoke checks (the image still must be run once to verify runtime).
+RUN set -eux; \
+    grep -q '^COMFYUI_VERSION=v0.38.0$' /opt/comfyui-baked/.runpod-bundle-version; \
+    grep -q 'CUSTOM_GPU_ONLY_PATCH_V1' /start.sh; \
+    git -C /opt/comfyui-baked describe --tags --exact-match HEAD | grep -qx 'v0.38.0'; \
+    python3.12 - <<'PY'
+import torch
+print('torch version:', torch.__version__)
+print('torch CUDA build:', torch.version.cuda)
+if '+cu130' not in torch.__version__ or not (torch.version.cuda or '').startswith('13.0'):
+    raise SystemExit('ERROR: base image is not using the expected CUDA 13 PyTorch build')
+PY
